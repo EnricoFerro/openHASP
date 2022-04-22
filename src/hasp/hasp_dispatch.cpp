@@ -41,15 +41,13 @@
 #include "hasp_config.h"
 #endif
 
-#if defined(HASP_USE_CUSTOM)
-#include "custom/my_custom.h"
-#endif
-
 dispatch_conf_t dispatch_setings = {.teleperiod = 300};
 
 uint16_t dispatchSecondsToNextTeleperiod = 0;
+uint16_t dispatchSecondsToNextSensordata = 0;
+uint16_t dispatchSecondsToNextDiscovery  = 0;
 uint8_t nCommands                        = 0;
-haspCommand_t commands[29];
+haspCommand_t commands[31];
 
 moodlight_t moodlight    = {.brightness = 255};
 uint8_t saved_jsonl_page = 0;
@@ -58,7 +56,7 @@ uint8_t saved_jsonl_page = 0;
  */
 void dispatch_state_subtopic(const char* subtopic, const char* payload)
 {
-#if !defined(HASP_USE_MQTT) && !defined(HASP_USE_TASMOTA_CLIENT)
+#if HASP_USE_MQTT == 0 && HASP_USE_TASMOTA_CLIENT == 0
     LOG_TRACE(TAG_MSGR, F("%s => %s"), subtopic, payload);
 #else
 
@@ -133,7 +131,9 @@ void dispatch_state_val(const char* topic, hasp_event_t eventid, int32_t val)
 
 void dispatch_json_error(uint8_t tag, DeserializationError& jsonError)
 {
-    LOG_ERROR(tag, F(D_JSON_FAILED " %s"), jsonError.c_str());
+    LOG_ERROR(tag, F(D_JSON_FAILED " %d"), jsonError);
+    // const char * error = jsonError.c_str();
+    // LOG_ERROR(tag, F(D_JSON_FAILED " %s"), error);
 }
 
 // p[x].b[y].attr=value
@@ -703,27 +703,25 @@ void dispatch_exec(const char*, const char* payload, uint8_t source)
 
     // char buffer[512]; // use stack
     String buffer((char*)0); // use heap
-    buffer.reserve(256);
+    buffer.reserve(512);
 
-    ReadBufferingStream bufferedFile{cmdfile, 256};
+    ReadBufferingStream bufferedFile{cmdfile, 512};
     cmdfile.seek(0);
 
     while(bufferedFile.available()) {
         size_t index = 0;
         buffer       = "";
-        // while(index < sizeof(buffer) - 1) {
         while(index < MQTT_MAX_PACKET_SIZE) {
             int c = bufferedFile.read();
             if(c < 0 || c == '\n' || c == '\r') { // CR or LF
                 break;
             }
-            // buffer[index] = (char)c;
             buffer += (char)c;
             index++;
         }
-        // buffer[index] = 0;                                                      // terminate string
-        // if(index > 0 && buffer[0] != '#') dispatch_text_line(buffer.c_str(), TAG_FILE); // # for comments
-        if(index > 0 && buffer.charAt(0) != '#') dispatch_text_line(buffer.c_str(), TAG_FILE); // # for comments
+        if(index > 0 && buffer.charAt(0) != '#') { // Check for comments
+            dispatch_text_line(buffer.c_str(), TAG_FILE);
+        }
     }
 
     cmdfile.close();
@@ -976,36 +974,36 @@ void dispatch_web_update(const char*, const char* espOtaUrl, uint8_t source)
 
 void dispatch_antiburn(const char*, const char* payload, uint8_t source)
 {
-    if(strlen(payload) == 0) {
-        dispatch_state_antiburn(hasp_get_antiburn());
-        return;
-    }
+    if(strlen(payload) >= 0) {
+        size_t maxsize = (128u * ((strlen(payload) / 128) + 1)) + 128;
+        DynamicJsonDocument json(maxsize);
 
-    size_t maxsize = (128u * ((strlen(payload) / 128) + 1)) + 128;
-    DynamicJsonDocument json(maxsize);
+        // Note: Deserialization needs to be (const char *) so the objects WILL be copied
+        // this uses more memory but otherwise the mqtt receive buffer can get overwritten by the send buffer !!
+        DeserializationError jsonError = deserializeJson(json, payload);
+        json.shrinkToFit();
+        int32_t count   = 30;
+        uint32_t period = 1000;
+        bool state      = false;
 
-    // Note: Deserialization needs to be (const char *) so the objects WILL be copied
-    // this uses more memory but otherwise the mqtt receive buffer can get overwritten by the send buffer !!
-    DeserializationError jsonError = deserializeJson(json, payload);
-    json.shrinkToFit();
-    bool state = false;
+        if(jsonError) { // Couldn't parse incoming payload as json
+            state = Parser::is_true(payload);
+        } else {
+            if(json.is<uint8_t>()) { // plain numbers are parsed as valid json object
+                state = json.as<uint8_t>();
 
-    if(jsonError) { // Couldn't parse incoming payload as json
-        state = Parser::is_true(payload);
-    } else {
-        if(json.is<uint8_t>()) { // plain numbers are parsed as valid json object
-            state = json.as<uint8_t>();
+            } else if(json.is<bool>()) { // true and false are parsed as valid json object
+                state = json.as<bool>();
 
-        } else if(json.is<bool>()) { // true and false are parsed as valid json object
-            state = json.as<bool>();
-
-        } else { // other text
-            JsonVariant key = json[F("state")];
-            if(!key.isNull()) state = Parser::is_true(key);
+            } else { // other text
+                JsonVariant key = json[F("state")];
+                if(!key.isNull()) state = Parser::is_true(key);
+            }
         }
+        hasp_set_antiburn(state ? count : 0, period); // ON = 30 cycles of 1000 milli seconds (i.e. 30 sec)
     }
 
-    hasp_set_antiburn(state ? 30 : 0, 1000); // ON = 30 cycles of 1000 milli seconds (i.e. 30 sec)
+    dispatch_state_antiburn(hasp_get_antiburn()); // Always publish the current state in response
 }
 
 // restart the device
@@ -1100,6 +1098,7 @@ void dispatch_send_sensordata(const char*, const char*, uint8_t source)
         default:
             LOG_ERROR(TAG_MQTT, F(D_ERROR_UNKNOWN));
     }
+    dispatchSecondsToNextSensordata = dispatch_setings.teleperiod;
 
 #endif
 }
@@ -1151,7 +1150,7 @@ void dispatch_send_discovery(const char*, const char*, uint8_t source)
         default:
             LOG_ERROR(TAG_MQTT, F(D_ERROR_UNKNOWN));
     }
-        // dispatchLastMillis = millis();
+    dispatchSecondsToNextDiscovery = dispatch_setings.teleperiod;
 
 #endif
 }
@@ -1166,7 +1165,7 @@ void dispatch_statusupdate(const char*, const char*, uint8_t source)
     {
         char buffer[128];
 
-        hasp_get_sleep_state(topic);
+        hasp_get_sleep_payload(hasp_get_sleep_state(), topic);
         snprintf_P(data, sizeof(data), PSTR("{\"node\":\"%s\",\"idle\":\"%s\",\"version\":\"%s\",\"uptime\":%lu,"),
                    haspDevice.get_hostname(), topic, haspDevice.get_version(),
                    long(millis() / 1000)); // \"status\":\"available\",
@@ -1213,12 +1212,14 @@ void dispatch_statusupdate(const char*, const char*, uint8_t source)
 
 void dispatch_current_state(uint8_t source)
 {
-    dispatch_statusupdate(NULL, NULL, source);
-    dispatch_idle(NULL, NULL, source);
     dispatch_current_page();
-    dispatch_send_sensordata(NULL, NULL, source);
-    dispatch_send_discovery(NULL, NULL, source);
+    dispatch_idle_state(hasp_get_sleep_state());
     dispatch_state_antiburn(hasp_get_antiburn());
+
+    // delayed published topic
+    dispatchSecondsToNextTeleperiod = 0;
+    dispatchSecondsToNextSensordata = 1;
+    dispatchSecondsToNextDiscovery  = 2;
 }
 
 // Format filesystem and erase EEPROM
@@ -1244,11 +1245,18 @@ void dispatch_calibrate(const char*, const char*, uint8_t source)
     guiCalibrate();
 }
 
+void dispatch_wakeup()
+{
+    if(hasp_get_sleep_state() == HASP_SLEEP_OFF) return;
+    hasp_set_sleep_state(HASP_SLEEP_OFF);
+    dispatch_idle_state(HASP_SLEEP_OFF);
+}
+
 void dispatch_wakeup_obsolete(const char* topic, const char*, uint8_t source)
 {
     LOG_WARNING(TAG_MSGR, F(D_ATTRIBUTE_OBSOLETE D_ATTRIBUTE_INSTEAD), topic,
                 "idle=off"); // TODO: obsolete dim, light and brightness
-    lv_disp_trig_activity(NULL);
+    dispatch_wakeup();
     hasp_set_wakeup_touch(false);
 }
 
@@ -1257,31 +1265,32 @@ void dispatch_sleep(const char*, const char*, uint8_t source)
     hasp_set_wakeup_touch(false);
 }
 
-void dispatch_idle(const char*, const char* payload, uint8_t source)
+void dispatch_idle_state(uint8_t state)
 {
     char topic[8];
     char buffer[8];
+    memcpy_P(topic, PSTR("idle"), 8);
+    hasp_get_sleep_payload(state, buffer);
+    dispatch_state_subtopic(topic, buffer);
+}
 
-    // idle off command
+void dispatch_idle(const char*, const char* payload, uint8_t source)
+{
     if(payload && strlen(payload)) {
         uint8_t state = HASP_SLEEP_LAST;
         if(!strcmp_P(payload, "off")) {
-            hasp_set_wakeup_touch(false);
-            state = HASP_SLEEP_OFF;
+            hasp_set_sleep_state(HASP_SLEEP_OFF);
         } else if(!strcmp_P(payload, "short")) {
-            state = HASP_SLEEP_SHORT;
+            hasp_set_sleep_state(HASP_SLEEP_SHORT);
         } else if(!strcmp_P(payload, "long")) {
-            state = HASP_SLEEP_LONG;
+            hasp_set_sleep_state(HASP_SLEEP_LONG);
         } else {
-            state = HASP_SLEEP_LAST;
+            LOG_WARNING(TAG_MSGR, F("Invalid idle value %s"), payload);
+            return;
         }
-        hasp_set_sleep_state(state);
     }
 
-    // idle state
-    memcpy_P(topic, PSTR("idle"), 8);
-    hasp_get_sleep_state(buffer);
-    dispatch_state_subtopic(topic, buffer);
+    dispatch_idle_state(hasp_get_sleep_state()); // always send the current state
 }
 
 void dispatch_reboot(const char*, const char*, uint8_t source)
@@ -1399,21 +1408,18 @@ void dispatchSetup()
 
     /* WARNING: remember to expand the commands array when adding new commands */
     dispatch_add_command(PSTR("json"), dispatch_parse_json);
-    dispatch_add_command(PSTR("page"), dispatch_page);
-    dispatch_add_command(PSTR("sleep"), dispatch_sleep);
-    dispatch_add_command(PSTR("statusupdate"), dispatch_statusupdate);
-    dispatch_add_command(PSTR("clearpage"), dispatch_clear_page);
     dispatch_add_command(PSTR("jsonl"), dispatch_parse_jsonl);
+    dispatch_add_command(PSTR("page"), dispatch_page);
     dispatch_add_command(PSTR("backlight"), dispatch_backlight);
     dispatch_add_command(PSTR("moodlight"), dispatch_moodlight);
     dispatch_add_command(PSTR("idle"), dispatch_idle);
-    dispatch_add_command(PSTR("dim"), dispatch_backlight_obsolete);        // dim
-    dispatch_add_command(PSTR("brightness"), dispatch_backlight_obsolete); // dim
-    dispatch_add_command(PSTR("light"), dispatch_backlight_obsolete);
+    dispatch_add_command(PSTR("sleep"), dispatch_sleep);
+    dispatch_add_command(PSTR("statusupdate"), dispatch_statusupdate);
+    dispatch_add_command(PSTR("clearpage"), dispatch_clear_page);
+    dispatch_add_command(PSTR("sensors"), dispatch_send_sensordata);
     dispatch_add_command(PSTR("theme"), dispatch_theme);
     dispatch_add_command(PSTR("run"), dispatch_exec);
     dispatch_add_command(PSTR("service"), dispatch_service);
-    dispatch_add_command(PSTR("wakeup"), dispatch_wakeup_obsolete);
     dispatch_add_command(PSTR("antiburn"), dispatch_antiburn);
     dispatch_add_command(PSTR("calibrate"), dispatch_calibrate);
     dispatch_add_command(PSTR("update"), dispatch_web_update);
@@ -1422,6 +1428,13 @@ void dispatchSetup()
     dispatch_add_command(PSTR("screenshot"), dispatch_screenshot);
     dispatch_add_command(PSTR("discovery"), dispatch_send_discovery);
     dispatch_add_command(PSTR("factoryreset"), dispatch_factory_reset);
+
+    /* obsolete commands */
+    dispatch_add_command(PSTR("dim"), dispatch_backlight_obsolete);
+    dispatch_add_command(PSTR("brightness"), dispatch_backlight_obsolete);
+    dispatch_add_command(PSTR("wakeup"), dispatch_wakeup_obsolete);
+    dispatch_add_command(PSTR("light"), dispatch_backlight_obsolete);
+
 #if HASP_USE_SPIFFS > 0 || HASP_USE_LITTLEFS > 0
 #if defined(ARDUINO_ARCH_ESP32)
     dispatch_add_command(PSTR("unzip"), filesystemUnzip);
@@ -1446,15 +1459,28 @@ IRAM_ATTR void dispatchLoop()
 #if 1 || ARDUINO
 void dispatchEverySecond()
 {
+#if HASP_USE_MQTT > 0
     if(dispatchSecondsToNextTeleperiod > 1) {
         dispatchSecondsToNextTeleperiod--;
-
     } else if(dispatch_setings.teleperiod > 0 && mqttIsConnected()) {
         dispatch_statusupdate(NULL, NULL, TAG_MSGR);
-        dispatch_send_discovery(NULL, NULL, TAG_MSGR);
-        dispatch_send_sensordata(NULL, NULL, TAG_MSGR);
         dispatchSecondsToNextTeleperiod = dispatch_setings.teleperiod;
     }
+
+    if(dispatchSecondsToNextSensordata > 1) {
+        dispatchSecondsToNextSensordata--;
+    } else if(dispatch_setings.teleperiod > 0 && mqttIsConnected()) {
+        dispatch_send_sensordata(NULL, NULL, TAG_MSGR);
+        dispatchSecondsToNextSensordata = dispatch_setings.teleperiod;
+    }
+
+    if(dispatchSecondsToNextDiscovery > 1) {
+        dispatchSecondsToNextDiscovery--;
+    } else if(dispatch_setings.teleperiod > 0 && mqttIsConnected()) {
+        dispatch_send_discovery(NULL, NULL, TAG_MSGR);
+        dispatchSecondsToNextDiscovery = dispatch_setings.teleperiod;
+    }
+#endif
 }
 #else
 #include <chrono>

@@ -14,10 +14,6 @@
 #include "drv/tft/tft_driver.h"
 #include "drv/touch/touch_driver.h"
 
-//#include "drv/hasp_drv_display.h"
-//#include "drv/old/hasp_drv_touch.h"
-//#include "drv/old/hasp_drv_tft_espi.h"
-
 #include "hasp_debug.h"
 #include "hasp_config.h"
 #include "hasp_gui.h"
@@ -26,23 +22,6 @@
 //#include "tpcal.h"
 
 //#include "Ticker.h"
-#include "lv_freetype.h"
-
-#if HASP_USE_PNGDECODE > 0
-#include "lv_png.h"
-#endif
-
-#if HASP_USE_BMPDECODE > 0
-#include "lv_bmp.h"
-#endif
-
-#if HASP_USE_GIFDECODE > 0
-#include "lv_gif.h"
-#endif
-
-#if HASP_USE_JPGDECODE > 0
-#include "lv_sjpg.h"
-#endif
 
 #define BACKLIGHT_CHANNEL 0 // pwm channel 0-15
 
@@ -191,9 +170,10 @@ void guiCalibrate(void)
     haspTouch.calibrate(gui_settings.cal_data);
 #endif
 
-    for(int i = 0; i < 5; i++) {
+    size_t len = sizeof(gui_settings.cal_data) / sizeof(gui_settings.cal_data[0]);
+    for(int i = 0; i < len; i++) {
         Serial.print(gui_settings.cal_data[i]);
-        if(i < 4) Serial.print(", ");
+        if(i < len - 1) Serial.print(", ");
     }
 
     delay(500);
@@ -217,8 +197,8 @@ static inline void gui_init_tft(void)
     // Initialize TFT
     LOG_TRACE(TAG_TFT, F(D_SERVICE_STARTING));
     gui_start_tft();
-
     haspTft.show_info();
+
 #ifdef USE_DMA_TO_TFT
     LOG_VERBOSE(TAG_TFT, F("DMA        : " D_SETTING_ENABLED));
 #else
@@ -256,6 +236,9 @@ static inline void gui_init_freetype()
 {
 // #ifdef 1 || USE_LVGL_FREETYPE
 #if defined(ARDUINO_ARCH_ESP32)
+
+#if(HASP_USE_FREETYPE > 0)
+
     if(lv_freetype_init(USE_LVGL_FREETYPE_MAX_FACES, USE_LVGL_FREETYPE_MAX_SIZES,
                         hasp_use_psram() ? USE_LVGL_FREETYPE_MAX_BYTES_PSRAM : USE_LVGL_FREETYPE_MAX_BYTES)) {
         LOG_VERBOSE(TAG_FONT, F("FreeType v%d.%d.%d " D_SERVICE_STARTED), FREETYPE_MAJOR, FREETYPE_MINOR,
@@ -263,6 +246,9 @@ static inline void gui_init_freetype()
     } else {
         LOG_ERROR(TAG_FONT, F("FreeType " D_SERVICE_START_FAILED));
     }
+#else
+    LOG_VERBOSE(TAG_FONT, F("FreeType " D_SERVICE_DISABLED));
+#endif
 
 #elif defined(WINDOWS) || defined(POSIX)
 #else
@@ -296,6 +282,7 @@ void guiSetup()
 {
     // Initialize hardware drivers
     gui_init_tft();
+    haspDevice.show_info(); // debug info + preload app flash size
 
     // Initialize LVGL
     LOG_TRACE(TAG_LVGL, F(D_SERVICE_STARTING));
@@ -306,7 +293,7 @@ void guiSetup()
     font_setup();
 
     /* Initialize the LVGL display driver with correct orientation */
-#if(TOUCH_DRIVER == 0x2046) || defined(LGFX_USE_V1) // Use native display driver to rotate display and touch
+#if(TOUCH_DRIVER == 0x2046) // || defined(LGFX_USE_V1) // Use native display driver to rotate display and touch
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
     disp_drv.buffer   = &disp_buf;
@@ -497,9 +484,10 @@ bool guiGetConfig(const JsonObject& settings)
     /* Check CalData array has changed */
     JsonArray array = settings[FPSTR(FP_GUI_CALIBRATION)].as<JsonArray>();
     uint8_t i       = 0;
+    size_t len      = sizeof(gui_settings.cal_data) / sizeof(gui_settings.cal_data[0]);
     for(JsonVariant v : array) {
         LOG_VERBOSE(TAG_GUI, F("GUI CONF: %d: %d <=> %d"), i, gui_settings.cal_data[i], v.as<uint16_t>());
-        if(i < 5) {
+        if(i < len) {
             if(gui_settings.cal_data[i] != v.as<uint16_t>()) changed = true;
             v.set(gui_settings.cal_data[i]);
         } else {
@@ -514,9 +502,9 @@ bool guiGetConfig(const JsonObject& settings)
     }
 
     /* Build new CalData array if the count is not correct */
-    if(i != 5) {
+    if(i != len) {
         array = settings[FPSTR(FP_GUI_CALIBRATION)].to<JsonArray>(); // Clear JsonArray
-        for(int i = 0; i < 5; i++) {
+        for(int i = 0; i < len; i++) {
             array.add(gui_settings.cal_data[i]);
         }
         changed = true;
@@ -573,10 +561,11 @@ bool guiSetConfig(const JsonObject& settings)
     if(!settings[FPSTR(FP_GUI_CALIBRATION)].isNull()) {
         bool status = false;
         int i       = 0;
+        size_t len  = sizeof(gui_settings.cal_data) / sizeof(gui_settings.cal_data[0]);
 
         JsonArray array = settings[FPSTR(FP_GUI_CALIBRATION)].as<JsonArray>();
         for(JsonVariant v : array) {
-            if(i < 5) {
+            if(i < len) {
                 if(gui_settings.cal_data[i] != v.as<uint16_t>()) status = true;
                 gui_settings.cal_data[i] = v.as<uint16_t>();
             }

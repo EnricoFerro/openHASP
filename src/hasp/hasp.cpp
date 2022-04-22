@@ -3,6 +3,7 @@
 
 #include "hasplib.h"
 #include "dev/device.h"
+#include "drv/tft/tft_driver.h"
 // #include "lv_datetime.h"
 #include "hasp_gui.h"
 
@@ -30,8 +31,6 @@
 #include "font/hasp_font_loader.h"
 //#include "hasp_filesystem.h" included in hasp_conf.h
 #endif
-
-#include "lv_freetype.h"
 
 #if HASP_USE_EEPROM > 0
 #include "EEPROM.h"
@@ -78,10 +77,13 @@ static uint16_t sleepTimeShort  = 60;             // 1 second resolution
 static uint16_t sleepTimeLong   = 120;            // 1 second resolution
 static uint32_t sleepTimeOffset = 0;              // 1 second resolution
 
-uint8_t haspStartDim   = 255;
-uint8_t haspStartPage  = 1;
-uint8_t haspThemeId    = 2;
-uint16_t haspThemeHue  = 200;
+uint8_t haspStartDim       = 255;
+uint8_t haspStartPage      = 1;
+uint8_t haspThemeId        = 2;
+uint16_t haspThemeHue      = 200;
+lv_color_t color_primary   = lv_color_hsv_to_rgb(200, 100, 100);
+lv_color_t color_secondary = lv_color_hsv_to_rgb(200, 100, 100);
+
 char haspPagesPath[32] = "/pages.jsonl";
 char haspZiFontPath[32];
 
@@ -114,30 +116,33 @@ HASP_ATTRIBUTE_FAST_MEM void hasp_update_sleep_state()
 
     if(sleepTimeLong > 0 && idle >= (sleepTimeShort + sleepTimeLong)) {
         if(hasp_sleep_state != HASP_SLEEP_LONG) {
-            hasp_sleep_state = HASP_SLEEP_LONG;
             gui_hide_pointer(true);
-            dispatch_idle(NULL, NULL, TAG_HASP);
+            hasp_sleep_state = HASP_SLEEP_LONG;
+            dispatch_idle_state(HASP_SLEEP_LONG);
         }
     } else if(sleepTimeShort > 0 && idle >= sleepTimeShort) {
         if(hasp_sleep_state != HASP_SLEEP_SHORT) {
-            hasp_sleep_state = HASP_SLEEP_SHORT;
             gui_hide_pointer(true);
-            dispatch_idle(NULL, NULL, TAG_HASP);
+            hasp_sleep_state = HASP_SLEEP_SHORT;
+            dispatch_idle_state(HASP_SLEEP_SHORT);
         }
     } else {
         if(hasp_sleep_state != HASP_SLEEP_OFF) {
-            hasp_sleep_state = HASP_SLEEP_OFF;
             gui_hide_pointer(false);
-            dispatch_idle(NULL, NULL, TAG_HASP);
+            hasp_sleep_state = HASP_SLEEP_OFF;
+            dispatch_idle_state(HASP_SLEEP_OFF);
         }
     }
-
-    //  return (hasp_sleep_state != HASP_SLEEP_OFF);
 }
 
 void hasp_set_sleep_offset(uint32_t offset)
 {
     sleepTimeOffset = offset;
+}
+
+uint8_t hasp_get_sleep_state()
+{
+    return hasp_sleep_state;
 }
 
 void hasp_set_sleep_state(uint8_t state)
@@ -151,6 +156,7 @@ void hasp_set_sleep_state(uint8_t state)
             break;
         case HASP_SLEEP_OFF:
             hasp_set_sleep_offset(0);
+            hasp_set_wakeup_touch(false);
             break;
         default:
             return;
@@ -159,9 +165,9 @@ void hasp_set_sleep_state(uint8_t state)
     hasp_sleep_state = state;
 }
 
-void hasp_get_sleep_state(char* payload)
+void hasp_get_sleep_payload(uint8_t state, char* payload)
 {
-    switch(hasp_sleep_state) {
+    switch(state) {
         case HASP_SLEEP_LONG:
             memcpy_P(payload, PSTR("long"), 5);
             break;
@@ -178,26 +184,50 @@ void hasp_get_sleep_state(char* payload)
  */
 static lv_task_t* antiburn_task;
 
-void hasp_stop_antiburn(lv_obj_t* layer)
+void hasp_stop_antiburn()
 {
+    lv_obj_t* layer = lv_disp_get_layer_sys(NULL);
+    if(layer) lv_obj_set_style_local_bg_opa(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
+    if(antiburn_task) lv_task_del(antiburn_task);
     antiburn_task = NULL;
-    lv_obj_set_style_local_bg_opa(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_TRANSP);
     hasp_set_wakeup_touch(haspDevice.get_backlight_power() == false); // enabled if backlight is OFF
     gui_hide_pointer(false);
-    dispatch_state_antiburn(HASP_EVENT_OFF);
 }
 
 void hasp_antiburn_cb(lv_task_t* task)
 {
     lv_obj_t* layer = lv_disp_get_layer_sys(NULL);
-    if(!layer) return;
+    if(layer) {
+        // lv_color_t color[5] = {LV_COLOR_BLACK, LV_COLOR_WHITE, LV_COLOR_RED, LV_COLOR_LIME, LV_COLOR_BLUE};
+        // lv_obj_set_style_local_bg_color(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, color[task->repeat_count % 5]);
+        // lv_obj_set_style_local_bg_opa(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
+        lv_disp_t* disp         = lv_disp_get_default();
+        lv_disp_drv_t* disp_drv = &disp->driver;
+        lv_area_t area;
 
-    lv_color_t color[5] = {LV_COLOR_BLACK, LV_COLOR_WHITE, LV_COLOR_RED, LV_COLOR_LIME, LV_COLOR_BLUE};
-    lv_obj_set_style_local_bg_color(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, color[task->repeat_count % 5]);
-    lv_obj_set_style_local_bg_opa(layer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
+        area.x1 = 0;
+        area.x2 = disp_drv->hor_res - 1;
+        lv_color_t color[disp_drv->hor_res];
+
+        for(lv_coord_t y = 0; y < disp_drv->ver_res; y++) {
+            for(lv_coord_t x = 0; x < disp_drv->hor_res; x++) {
+#ifdef ARDUINO
+                color[x].full = random(UINT16_MAX);
+#else
+                color[x].full = random() * UINT16_MAX;
+#endif
+            }
+            area.y1 = y;
+            area.y2 = y;
+            haspTft.flush_pixels(disp_drv, &area, color);
+        }
+
+        if(task->repeat_count != 1) return; // don't stop yet
+    }
 
     // task is about to get deleted
-    if(task->repeat_count == 1) hasp_stop_antiburn(layer);
+    hasp_stop_antiburn();
+    dispatch_state_antiburn(HASP_EVENT_OFF);
 }
 
 /**
@@ -205,10 +235,10 @@ void hasp_antiburn_cb(lv_task_t* task)
  */
 void hasp_set_antiburn(int32_t repeat_count, uint32_t period)
 {
-    lv_obj_t* layer = lv_disp_get_layer_sys(NULL);
-    if(!layer) return;
-
     if(repeat_count != 0) {
+        lv_obj_t* layer = lv_disp_get_layer_sys(NULL);
+        if(!layer) return;
+
         if(!antiburn_task) antiburn_task = lv_task_create(hasp_antiburn_cb, period, LV_TASK_PRIO_LOWEST, NULL);
         if(antiburn_task) {
             lv_obj_set_event_cb(layer, first_touch_event_handler);
@@ -216,15 +246,11 @@ void hasp_set_antiburn(int32_t repeat_count, uint32_t period)
             lv_task_set_repeat_count(antiburn_task, repeat_count);
             lv_task_set_period(antiburn_task, period);
             gui_hide_pointer(true);
-            dispatch_state_antiburn(HASP_EVENT_ON);
         } else {
             LOG_INFO(TAG_HASP, F("Antiburn %s"), D_INFO_FAILED);
         }
     } else {
-        if(antiburn_task) {
-            lv_task_del(antiburn_task);
-            hasp_stop_antiburn(layer);
-        }
+        hasp_stop_antiburn();
     }
 }
 
@@ -395,9 +421,7 @@ static void custom_font_apply_cb(lv_theme_t* th, lv_obj_t* obj, lv_theme_style_t
 
 void hasp_set_theme(uint8_t themeid)
 {
-    lv_theme_t* th             = NULL;
-    lv_color_t color_primary   = lv_color_hsv_to_rgb(haspThemeHue, 100, 100);
-    lv_color_t color_secondary = lv_color_hsv_to_rgb(haspThemeHue, 100, 100);
+    lv_theme_t* th = NULL;
 
     /* ********** Theme Initializations ********** */
     if(themeid == 8) themeid = 1;          // update old HASP id
@@ -713,7 +737,7 @@ void hasp_get_info(JsonDocument& doc)
     buffer += "s";
     info[F(D_INFO_ENVIRONMENT)] = PIOENV;
     info[F(D_INFO_UPTIME)]      = buffer;
-    hasp_get_sleep_state(size_buf);
+    hasp_get_sleep_payload(hasp_get_sleep_state(), size_buf);
     info[F("Idle")]        = size_buf;
     info[F("Active Page")] = haspPages.get();
 
@@ -747,7 +771,12 @@ void hasp_get_info(JsonDocument& doc)
 #if HASP_USE_CONFIG > 0
 bool haspGetConfig(const JsonObject& settings)
 {
+    char buffer1[8];
+    char buffer2[8];
     bool changed = false;
+
+    Parser::ColorToHaspPayload(color_primary, buffer1, sizeof(buffer1));
+    Parser::ColorToHaspPayload(color_secondary, buffer2, sizeof(buffer2));
 
     if(haspStartPage != settings[FPSTR(FP_CONFIG_STARTPAGE)].as<uint8_t>()) changed = true;
     settings[FPSTR(FP_CONFIG_STARTPAGE)] = haspStartPage;
@@ -758,8 +787,14 @@ bool haspGetConfig(const JsonObject& settings)
     if(haspThemeId != settings[FPSTR(FP_CONFIG_THEME)].as<uint8_t>()) changed = true;
     settings[FPSTR(FP_CONFIG_THEME)] = haspThemeId;
 
-    if(haspThemeHue != settings[FPSTR(FP_CONFIG_HUE)].as<uint16_t>()) changed = true;
-    settings[FPSTR(FP_CONFIG_HUE)] = haspThemeHue;
+    // if(haspThemeHue != settings[FPSTR(FP_CONFIG_HUE)].as<uint16_t>()) changed = true;
+    // settings[FPSTR(FP_CONFIG_HUE)] = haspThemeHue;
+
+    if(strcmp(buffer1, settings[FPSTR(FP_CONFIG_COLOR1)].as<String>().c_str()) != 0) changed = true;
+    settings[FPSTR(FP_CONFIG_COLOR1)] = buffer1;
+
+    if(strcmp(buffer2, settings[FPSTR(FP_CONFIG_COLOR2)].as<String>().c_str()) != 0) changed = true;
+    settings[FPSTR(FP_CONFIG_COLOR2)] = buffer2;
 
     if(strcmp(haspZiFontPath, settings[FPSTR(FP_CONFIG_ZIFONT)].as<String>().c_str()) != 0) changed = true;
     settings[FPSTR(FP_CONFIG_ZIFONT)] = haspZiFontPath;
@@ -782,12 +817,28 @@ bool haspGetConfig(const JsonObject& settings)
 bool haspSetConfig(const JsonObject& settings)
 {
     configOutput(settings, TAG_HASP);
+    lv_color32_t c;
+    JsonVariant color_str;
     bool changed = false;
 
     changed |= configSet(haspStartPage, settings[FPSTR(FP_CONFIG_STARTPAGE)], F("haspStartPage"));
     changed |= configSet(haspStartDim, settings[FPSTR(FP_CONFIG_STARTDIM)], F("haspStartDim"));
-    changed |= configSet(haspThemeId, settings[FPSTR(FP_CONFIG_THEME)], F("haspThemeId"));
-    changed |= configSet(haspThemeHue, settings[FPSTR(FP_CONFIG_HUE)], F("haspThemeHue"));
+
+    { // Theme related settings
+        // Set from Hue first
+        bool theme_changed = false;
+        theme_changed |= configSet(haspThemeId, settings[FPSTR(FP_CONFIG_THEME)], F("haspThemeId"));
+        theme_changed |= configSet(haspThemeHue, settings[FPSTR(FP_CONFIG_HUE)], F("haspThemeHue"));
+        color_primary   = lv_color_hsv_to_rgb(haspThemeHue, 100, 100);
+        color_secondary = lv_color_hsv_to_rgb(haspThemeHue, 100, 100);
+
+        // Check for color1 and color2
+        theme_changed |= configSet(color_primary, settings[FPSTR(FP_CONFIG_COLOR1)], F("haspColor1"));
+        theme_changed |= configSet(color_secondary, settings[FPSTR(FP_CONFIG_COLOR2)], F("haspColor2"));
+
+        changed |= theme_changed;
+        // if(theme_changed) hasp_set_theme(haspThemeId); // LVGL is not inited at config load time
+    }
 
     if(haspStartPage == 0) { // TODO: fase out migration code
         haspStartPage = 1;

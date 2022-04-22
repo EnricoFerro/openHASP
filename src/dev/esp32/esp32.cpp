@@ -108,7 +108,7 @@ Esp32Device::Esp32Device()
     _backlight_invert = (TFT_BACKLIGHT_ON == LOW);
     _backlight_power  = 1;
     _backlight_level  = 255;
-    _backlight_pin    = TFT_BCKL;
+    _backlight_pin    = 255; // not TFT_BCKL because it is unkown at this stage
 
     /* fill unique identifier with wifi mac */
     byte mac[6];
@@ -227,7 +227,11 @@ const char* Esp32Device::get_chip_model()
     */
     _chip_model = ESP.getChipModel();
     _chip_model += " rev";
+#if ESP_ARDUINO_VERSION_MAJOR >= 2
     _chip_model += std::to_string(ESP.getChipRevision());
+#else
+    _chip_model += String(ESP.getChipRevision()).c_str();
+#endif
     return _chip_model.c_str();
 }
 
@@ -408,6 +412,15 @@ void Esp32Device::get_info(JsonDocument& doc)
 
     Parser::format_bytes(ESP.getFreeSketchSpace(), size_buf, sizeof(size_buf));
     info[F(D_INFO_SKETCH_FREE)] = size_buf;
+
+    Parser::format_bytes(HASP_FS.totalBytes(), size_buf, sizeof(size_buf));
+    info[F(D_INFO_FS_SIZE)] = size_buf;
+
+    Parser::format_bytes(HASP_FS.usedBytes(), size_buf, sizeof(size_buf));
+    info[F(D_INFO_FS_USED)] = size_buf;
+
+    Parser::format_bytes(HASP_FS.totalBytes() - HASP_FS.usedBytes(), size_buf, sizeof(size_buf));
+    info[F(D_INFO_FS_FREE)] = size_buf;
 }
 
 void Esp32Device::get_sensors(JsonDocument& doc)
