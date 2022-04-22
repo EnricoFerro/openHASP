@@ -91,6 +91,16 @@ void M5StackCore2::get_sensors(JsonDocument& doc)
     sensor[F("Charging")]          = Axp.isCharging();
 }
 
+void M5StackCore2::set_led(bool led)
+{
+    Axp.SetLed(led);
+}
+
+void M5StackCore2::shutdown()
+{
+    Axp.PowerOff();
+}
+
 } // namespace dev
 
 dev::M5StackCore2 haspDevice;
